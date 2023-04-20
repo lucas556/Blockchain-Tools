@@ -32,7 +32,7 @@ def transfer_token(private_key, from_account, to, amount):
 if __name__ == '__main__':
     private_key = '0x...'
     recipient = '0x...'
-
+# Change the name to main.py
     sender = web3.eth.account.from_key(private_key).address
     transfer_amount = Decimal(web3.from_wei(token.functions.balanceOf(sender).call(), 'ether'))
     while True:
