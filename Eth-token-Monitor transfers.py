@@ -7,7 +7,7 @@ bsc = 'https://bsc-dataseed.binance.org'
 web3 = Web3(Web3.HTTPProvider(bsc))
 token_contract_address = '0x...'
 
-with open(".../cake.json") as f:
+with open(".../usdt.json") as f:
     token_abi = json.load(f)
 
 token = web3.eth.contract(address=token_contract_address, abi=token_abi)
