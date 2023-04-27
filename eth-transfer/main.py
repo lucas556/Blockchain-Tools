@@ -33,7 +33,7 @@ if __name__ == '__main__':
         # print(transfer_amount)
         if transfer_amount > 0.1:
             transfer(sender_private_key, sender_address, recipient_address, balance_eth)
-            print("ETH transfer: " + str(balance_eth))
+            print("ETH transfer: " + str(transfer_amount))
             time.sleep(15)
             print("Continue after 15s")
             continue
