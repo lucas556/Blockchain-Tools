@@ -3,7 +3,7 @@ from decimal import Decimal
 import time
 
 # 连接以太坊节点
-w3 = Web3(Web3.HTTPProvider('https://mainnet.infura.io/v3/b72a1c135e1547629678850ce7caed27'))
+w3 = Web3(Web3.HTTPProvider('https://mainnet.infura.io/v3/.......'))
 
 def transfer(private_key, from_account, to, amount):
     gas_price = w3.eth.gas_price
