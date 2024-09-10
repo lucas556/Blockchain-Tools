@@ -1,4 +1,5 @@
 '''
+bech32_address 隔离见证
 生成环境中请更换随机数生成方法以及库选择更好的
 '''
 import hashlib
