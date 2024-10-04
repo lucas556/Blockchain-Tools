@@ -7,7 +7,6 @@ import base58
 create_transaction_url = "https://api.trongrid.io/wallet/createtransaction"
 broadcast_url = "https://api.trongrid.io/wallet/broadcasttransaction"
 
-# 私钥（替换为你的实际私钥）
 private_key_hex = "0......"
 
 # 转账参数
