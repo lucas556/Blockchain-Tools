@@ -128,7 +128,7 @@ class TronTransactionHandler:
         signature = private_key.sign(tx_hash, ec.ECDSA(hashes.SHA256()))
         return signature.hex()
 
-        def create_transaction(self, private_key_hex: str, from_address: str, to_address: str, amount: int):
+    def create_transaction(self, private_key_hex: str, from_address: str, to_address: str, amount: int):
         try:
             transaction = copy.deepcopy(Transaction)
 
