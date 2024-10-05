@@ -54,7 +54,6 @@ class Transaction:
         return raw_data_bytes.hex()
 
     def calculate_txID(self) -> str:
-        # 计算 txID 基于序列化的原始数据
         tx_hash = hashes.Hash(hashes.SHA256(), backend=default_backend())
         tx_hash.update(bytes.fromhex(self.serialize_to_hex()))
         return tx_hash.finalize().hex()
@@ -71,7 +70,7 @@ def sign_transaction(raw_data_hex: str, private_key_hex: str) -> str:
     
     return signature.hex()
 
-def create_and_broadcast_transaction(private_key_hex: str, from_address: str, to_address: str, amount: int):
+def create_broadcast_transaction(private_key_hex: str, from_address: str, to_address: str, amount: int):
     block_url = "https://api.trongrid.io/walletsolidity/getnowblock"
     broadcast_url = "https://api.trongrid.io/wallet/broadcasttransaction"
 
@@ -99,7 +98,6 @@ def create_and_broadcast_transaction(private_key_hex: str, from_address: str, to
     raw_data_hex = transaction.serialize_to_hex()
     signature = sign_transaction(raw_data_hex, private_key_hex)
 
-    # 通过 Transaction 实例计算 txID
     txID_hex = transaction.calculate_txID()
     
     signed_transaction = {
@@ -116,10 +114,9 @@ def create_and_broadcast_transaction(private_key_hex: str, from_address: str, to
     else:
         print("Broadcast successful:", response_data)
 
-# Example usage:
 private_key_hex = "your_private_key_here"
 from_address = "your_from_address_here"
 to_address = "your_to_address_here"
 amount = 10 * 1_000_000  # 10 TRX
 
-create_and_broadcast_transaction(private_key_hex, from_address, to_address, amount)
+create_broadcast_transaction(private_key_hex, from_address, to_address, amount)
