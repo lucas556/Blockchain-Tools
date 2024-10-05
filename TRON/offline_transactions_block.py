@@ -2,8 +2,6 @@ import requests
 import base58
 import time
 import struct
-import orjson
-from dataclasses import dataclass, asdict
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.backends import default_backend
@@ -13,6 +11,24 @@ from cryptography.hazmat.primitives.serialization import load_der_private_key
 GETBLOCK_URL = "https://api.trongrid.io/walletsolidity/getblock"
 BROADCAST_URL = "https://api.trongrid.io/wallet/broadcasttransaction"
 # API_KEY = "your_getblock_api_key_here"  # Your GetBlock API Key
+
+Transaction = {
+    "contract": [{
+        "parameter": {
+            "value": {
+                "amount": None,  # To be filled
+                "owner_address": None,  # To be filled
+                "to_address": None  # To be filled
+            },
+            "type_url": "type.googleapis.com/protocol.TransferContract"
+        },
+        "type": "TransferContract"
+    }],
+    "ref_block_bytes": None,  # To be filled
+    "ref_block_hash": None,  # To be filled
+    "expiration": None,  # To be filled
+    "timestamp": None  # To be filled
+}
 
 # Helper function to convert Base58 to Hex
 def base58_to_hex(base58_address: str) -> str:
@@ -26,81 +42,6 @@ def base58_to_hex(base58_address: str) -> str:
         raise ValueError("Invalid Tron address, should start with 41.")
     return hex_address
 
-# Dataclass structure for Contract and Transaction
-@dataclass
-class ContractValue:
-    amount: int
-    owner_address: str
-    to_address: str
-
-@dataclass
-class ContractParameter:
-    value: ContractValue
-    type_url: str
-
-@dataclass
-class Contract:
-    parameter: ContractParameter
-    type: str
-
-@dataclass
-class Transaction:
-    contract: Contract
-    ref_block_bytes: str
-    ref_block_hash: str
-    expiration: int
-    timestamp: int
-
-    def serialize_to_hex(self) -> str:
-        raw_data_bytes = b'\x0a' + (1).to_bytes(1, 'big')
-        
-        # Serialize the owner_address, to_address, and amount
-        raw_data_bytes += (
-            b'\x12' + struct.pack('>I', len(self.contract.parameter.value.owner_address) // 2)
-            + bytes.fromhex(self.contract.parameter.value.owner_address)
-            + b'\x1a' + struct.pack('>I', len(self.contract.parameter.value.to_address) // 2)
-            + bytes.fromhex(self.contract.parameter.value.to_address)
-            + b'\x20' + struct.pack('>Q', self.contract.parameter.value.amount)
-        )
-        
-        # Serialize ref_block_bytes and ref_block_hash
-        raw_data_bytes += (
-            b'\x22' + struct.pack('>I', len(self.ref_block_bytes) // 2) + bytes.fromhex(self.ref_block_bytes)
-            + b'\x28' + struct.pack('>I', len(self.ref_block_hash) // 2) + bytes.fromhex(self.ref_block_hash)
-        )
-        
-        # Serialize expiration and timestamp
-        raw_data_bytes += (
-            b'\x30' + struct.pack('>Q', self.expiration)
-            + b'\x38' + struct.pack('>Q', self.timestamp)
-        )
-        
-        return raw_data_bytes.hex()
-
-    def calculate_txID(self) -> str:
-        tx_hash = hashes.Hash(hashes.SHA256(), backend=default_backend())
-        tx_hash.update(bytes.fromhex(self.serialize_to_hex()))
-        return tx_hash.finalize().hex()
-
-    def sign_transaction(self, private_key_hex: str) -> str:
-        private_key_bytes = bytes.fromhex(private_key_hex)
-        private_key = load_der_private_key(private_key_bytes, password=None, backend=default_backend())
-        
-        digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
-        digest.update(bytes.fromhex(self.serialize_to_hex()))
-        tx_hash = digest.finalize()
-        
-        signature = private_key.sign(tx_hash, ec.ECDSA(hashes.SHA256()))
-        return signature.hex()
-
-# Dataclass to represent signed transaction
-@dataclass
-class SignedTransaction:
-    txID: str
-    raw_data: dict
-    raw_data_hex: str
-    signature: list
-
 # Class to encapsulate transaction creation and broadcasting
 class TronTransactionHandler:
     def __init__(self, getblock_url: str = GETBLOCK_URL, broadcast_url: str = BROADCAST_URL, api_key: str = API_KEY):
@@ -109,7 +50,6 @@ class TronTransactionHandler:
         self.api_key = api_key
 
     def fetch_block_data(self):
-        # Fetch block data using GetBlock API
         headers = {
             'accept': 'application/json',
             'content-type': 'application/json',
@@ -128,50 +68,79 @@ class TronTransactionHandler:
         return ref_block_bytes_hex, ref_block_hash
 
     def create_transaction(self, private_key_hex: str, from_address: str, to_address: str, amount: int):
+        transaction = Transaction.copy()
         ref_block_bytes_hex, ref_block_hash = self.fetch_block_data()
-
-        # Current time for expiration and timestamp
+        
         current_time = int(time.time() * 1000)
+        transaction["contract"][0]["parameter"]["value"]["amount"] = amount
+        transaction["contract"][0]["parameter"]["value"]["owner_address"] = base58_to_hex(from_address)
+        transaction["contract"][0]["parameter"]["value"]["to_address"] = base58_to_hex(to_address)
+        transaction["ref_block_bytes"] = ref_block_bytes_hex
+        transaction["ref_block_hash"] = ref_block_hash
+        transaction["expiration"] = current_time + 60 * 1000
+        transaction["timestamp"] = current_time
 
-        # Create transaction object using dataclass
-        transaction = Transaction(
-            contract=Contract(
-                parameter=ContractParameter(
-                    value=ContractValue(
-                        amount=amount,
-                        owner_address=base58_to_hex(from_address),
-                        to_address=base58_to_hex(to_address)
-                    ),
-                    type_url="type.googleapis.com/protocol.TransferContract"
-                ),
-                type="TransferContract"
-            ),
-            ref_block_bytes=str(ref_block_bytes_hex),
-            ref_block_hash=str(ref_block_hash),
-            expiration=current_time + 60 * 1000,
-            timestamp=current_time
-        )
+        raw_data_hex = self.serialize_to_hex(transaction)
+        signature = self.sign_transaction(raw_data_hex, private_key_hex)
 
-        # Serialize and sign transaction
-        raw_data_hex = transaction.serialize_to_hex()
-        signature = transaction.sign_transaction(private_key_hex)
+        txID_hex = self.calculate_txID(raw_data_hex)
 
-        # Calculate txID
-        txID_hex = transaction.calculate_txID()
-
-        # Create signed transaction object using dataclass
-        signed_transaction = SignedTransaction(
-            txID=txID_hex,
-            raw_data=asdict(transaction),
-            raw_data_hex=raw_data_hex,
-            signature=[signature]
-        )
+        signed_transaction = {
+            "txID": txID_hex,
+            "raw_data": transaction,
+            "raw_data_hex": raw_data_hex,
+            "signature": [signature]
+        }
 
         return signed_transaction
 
-    def broadcast_transaction(self, signed_transaction: SignedTransaction):
-        # Broadcast transaction
-        broadcast_response = requests.post(self.broadcast_url, json=asdict(signed_transaction))
+    def serialize_to_hex(self, transaction) -> str:
+        raw_data_bytes = b'\x0a' + (1).to_bytes(1, 'big')
+        
+        param_value = transaction["contract"][0]["parameter"]["value"]
+        # Serialize owner_address, to_address, and amount
+        raw_data_bytes += (
+            b'\x12' + struct.pack('>I', len(param_value["owner_address"]) // 2)
+            + bytes.fromhex(param_value["owner_address"])
+            + b'\x1a' + struct.pack('>I', len(param_value["to_address"]) // 2)
+            + bytes.fromhex(param_value["to_address"])
+            + b'\x20' + struct.pack('>Q', param_value["amount"])
+        )
+        
+        # Serialize ref_block_bytes and ref_block_hash
+        raw_data_bytes += (
+            b'\x22' + struct.pack('>I', len(transaction["ref_block_bytes"]) // 2)
+            + bytes.fromhex(transaction["ref_block_bytes"])
+            + b'\x28' + struct.pack('>I', len(transaction["ref_block_hash"]) // 2)
+            + bytes.fromhex(transaction["ref_block_hash"])
+        )
+        
+        # Serialize expiration and timestamp
+        raw_data_bytes += (
+            b'\x30' + struct.pack('>Q', transaction["expiration"])
+            + b'\x38' + struct.pack('>Q', transaction["timestamp"])
+        )
+        
+        return raw_data_bytes.hex()
+
+    def calculate_txID(self, raw_data_hex: str) -> str:
+        digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
+        digest.update(bytes.fromhex(raw_data_hex))
+        return digest.finalize().hex()
+
+    def sign_transaction(self, raw_data_hex: str, private_key_hex: str) -> str:
+        private_key_bytes = bytes.fromhex(private_key_hex)
+        private_key = load_der_private_key(private_key_bytes, password=None, backend=default_backend())
+
+        digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
+        digest.update(bytes.fromhex(raw_data_hex))
+        tx_hash = digest.finalize()
+
+        signature = private_key.sign(tx_hash, ec.ECDSA(hashes.SHA256()))
+        return signature.hex()
+
+    def broadcast_transaction(self, signed_transaction):
+        broadcast_response = requests.post(self.broadcast_url, json=signed_transaction)
         response_data = broadcast_response.json()
         if broadcast_response.status_code != 200 or response_data.get("code") is not None:
             print(f"Broadcast failed: {response_data}")
