@@ -53,6 +53,12 @@ class Transaction:
         
         return raw_data_bytes.hex()
 
+    def calculate_txID(self) -> str:
+        # 计算 txID 基于序列化的原始数据
+        tx_hash = hashes.Hash(hashes.SHA256(), backend=default_backend())
+        tx_hash.update(bytes.fromhex(self.serialize_to_hex()))
+        return tx_hash.finalize().hex()
+
 def sign_transaction(raw_data_hex: str, private_key_hex: str) -> str:
     private_key_bytes = bytes.fromhex(private_key_hex)
     private_key = load_der_private_key(private_key_bytes, password=None, backend=default_backend())
@@ -93,9 +99,8 @@ def create_and_broadcast_transaction(private_key_hex: str, from_address: str, to
     raw_data_hex = transaction.serialize_to_hex()
     signature = sign_transaction(raw_data_hex, private_key_hex)
 
-    txID = hashes.Hash(hashes.SHA256(), backend=default_backend())
-    txID.update(orjson.dumps(asdict(transaction), option=orjson.OPT_SORT_KEYS))
-    txID_hex = txID.finalize().hex()
+    # 通过 Transaction 实例计算 txID
+    txID_hex = transaction.calculate_txID()
     
     signed_transaction = {
         "txID": txID_hex,
@@ -111,6 +116,7 @@ def create_and_broadcast_transaction(private_key_hex: str, from_address: str, to
     else:
         print("Broadcast successful:", response_data)
 
+# Example usage:
 private_key_hex = "your_private_key_here"
 from_address = "your_from_address_here"
 to_address = "your_to_address_here"
