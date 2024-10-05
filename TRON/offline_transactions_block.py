@@ -1,106 +1,119 @@
 import requests
-from ecdsa import SigningKey, SECP256k1
-from hashlib import sha256
-import json
 import base58
 import time
 import struct
+import orjson
+from dataclasses import dataclass, asdict
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.serialization import load_der_private_key
 
-# TRON API 地址
-create_transaction_url = "https://api.trongrid.io/wallet/createtransaction"
-broadcast_url = "https://api.trongrid.io/wallet/broadcasttransaction"
-block_url = "https://api.trongrid.io/walletsolidity/getnowblock"
-# 私钥（替换为你的实际私钥）
-private_key_hex = "......"
-
-# 转账参数
-from_address = "T......"  # 发送方地址 (Base58)
-to_address = "T......"   # 接收方地址 (Base58)
-amount = 10 * 1_000_000  # 10 TRX
-
-def base58_to_hex(base58_address):
-    decoded = base58.b58decode_check(base58_address)
+def base58_to_hex(base58_address: str) -> str:
+    try:
+        decoded = base58.b58decode_check(base58_address)
+    except ValueError:
+        raise ValueError("Invalid Base58 address provided")
+    
     hex_address = decoded.hex()
     if not hex_address.startswith('41'):
         raise ValueError("Invalid Tron address, should start with 41.")
     return hex_address
 
-block_response = requests.get(block_url)
-block_data = block_response.json()
+@dataclass
+class Transaction:
+    owner_address: str
+    to_address: str
+    amount: int
+    ref_block_bytes: str
+    ref_block_hash: str
+    expiration: int
+    timestamp: int
 
-# Extracting block reference info
-ref_block_bytes = block_data['block_header']['raw_data']['number'] % 65536  # 取模以确保不会溢出
-ref_block_bytes_hex = ref_block_bytes.to_bytes(2, 'big').hex()  # 转为16进制
-ref_block_hash = block_data['blockID'][:16]
-
-transaction_raw_data = {
-    "contract": [{
-        "parameter": {
-            "value": {
-                "amount": amount,
-                "owner_address": base58_to_hex(from_address),
-                "to_address": base58_to_hex(to_address)
-            },
-            "type_url": "type.googleapis.com/protocol.TransferContract"
-        },
-        "type": "TransferContract"
-    }],
-    "ref_block_bytes": str(ref_block_bytes),
-    "ref_block_hash": str(ref_block_hash),
-    "expiration": int(time.time() * 1000) + 60 * 1000,  # 1-minute expiration
-    "timestamp": int(time.time() * 1000)
-}
-
-def serialize_to_hex(data):
-    raw_data_bytes = b'\x0a' + (len(data['contract'])).to_bytes(1, 'big')
-    
-    for contract in data['contract']:
-        param_value = contract['parameter']['value']
-        # 合并 owner_address, to_address 和 amount 的字节序列
+    def serialize_to_hex(self) -> str:
+        raw_data_bytes = b'\x0a' + (1).to_bytes(1, 'big')
+        
         raw_data_bytes += (
-            b'\x12' + struct.pack('>I', len(param_value['owner_address']) // 2)  # owner_address 长度
-            + bytes.fromhex(param_value['owner_address'])  # 转换 owner_address 为字节
-            + b'\x1a' + struct.pack('>I', len(param_value['to_address']) // 2)  # to_address 长度
-            + bytes.fromhex(param_value['to_address'])  # 转换 to_address 为字节
-            + b'\x20' + struct.pack('>Q', param_value['amount'])  # amount 作为 8 字节的整数
+            b'\x12' + struct.pack('>I', len(self.owner_address) // 2)
+            + bytes.fromhex(self.owner_address)
+            + b'\x1a' + struct.pack('>I', len(self.to_address) // 2)
+            + bytes.fromhex(self.to_address)
+            + b'\x20' + struct.pack('>Q', self.amount)
         )
-    
-    raw_data_bytes += (
-        b'\x22' + struct.pack('>I', len(data['ref_block_bytes']) // 2) + bytes.fromhex(data['ref_block_bytes'])  # ref_block_bytes
-        + b'\x28' + struct.pack('>I', len(data['ref_block_hash']) // 2) + bytes.fromhex(data['ref_block_hash'])  # ref_block_hash
-    )
-    
-    # 序列化 expiration 和 timestamp
-    raw_data_bytes += (
-        b'\x30' + struct.pack('>Q', data['expiration'])  # expiration 为 8 字节
-        + b'\x38' + struct.pack('>Q', data['timestamp'])  # timestamp 为 8 字节
-    )
-    
-    return raw_data_bytes.hex()
+        
+        raw_data_bytes += (
+            b'\x22' + struct.pack('>I', len(self.ref_block_bytes) // 2) + bytes.fromhex(self.ref_block_bytes)
+            + b'\x28' + struct.pack('>I', len(self.ref_block_hash) // 2) + bytes.fromhex(self.ref_block_hash)
+        )
+        
+        raw_data_bytes += (
+            b'\x30' + struct.pack('>Q', self.expiration)
+            + b'\x38' + struct.pack('>Q', self.timestamp)
+        )
+        
+        return raw_data_bytes.hex()
 
-raw_data_hex = serialize_to_hex(transaction_raw_data)
-
-def sign_transaction(raw_data_hex, private_key_hex):
-    sk = SigningKey.from_string(bytes.fromhex(private_key_hex), curve=SECP256k1)
-    tx_hash = sha256(bytes.fromhex(raw_data_hex)).digest()  # 计算交易哈希
-    signature = sk.sign_digest(tx_hash, sigencode=lambda r, s, _: r.to_bytes(32, 'big') + s.to_bytes(32, 'big'))
+def sign_transaction(raw_data_hex: str, private_key_hex: str) -> str:
+    private_key_bytes = bytes.fromhex(private_key_hex)
+    private_key = load_der_private_key(private_key_bytes, password=None, backend=default_backend())
+    
+    digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
+    digest.update(bytes.fromhex(raw_data_hex))
+    tx_hash = digest.finalize()
+    
+    signature = private_key.sign(tx_hash, ec.ECDSA(hashes.SHA256()))
+    
     return signature.hex()
 
+def create_and_broadcast_transaction(private_key_hex: str, from_address: str, to_address: str, amount: int):
+    block_url = "https://api.trongrid.io/walletsolidity/getnowblock"
+    broadcast_url = "https://api.trongrid.io/wallet/broadcasttransaction"
 
-signature = sign_transaction(raw_data_hex, private_key_hex)
+    block_response = requests.get(block_url)
+    if block_response.status_code != 200:
+        raise Exception(f"Failed to fetch block data, status code: {block_response.status_code}")
+    
+    block_data = block_response.json()
+    ref_block_bytes = block_data['block_header']['raw_data']['number'] % 65536
+    ref_block_bytes_hex = ref_block_bytes.to_bytes(2, 'big').hex()
+    ref_block_hash = block_data['blockID'][:16]
 
-# TXID
-raw_data_serialized = json.dumps(transaction_raw_data, separators=(',', ':')).encode('utf-8')
-txID = sha256(raw_data_serialized).hexdigest()
+    current_time = int(time.time() * 1000)
+    
+    transaction = Transaction(
+        owner_address=base58_to_hex(from_address),
+        to_address=base58_to_hex(to_address),
+        amount=amount,
+        ref_block_bytes=ref_block_bytes_hex,
+        ref_block_hash=ref_block_hash,
+        expiration=current_time + 60 * 1000,
+        timestamp=current_time
+    )
 
+    raw_data_hex = transaction.serialize_to_hex()
+    signature = sign_transaction(raw_data_hex, private_key_hex)
 
-signed_transaction = {
-    "txID": txID,
-    "raw_data": transaction_raw_data,
-    "raw_data_hex": raw_data_hex,
-    "signature": [signature]
-}
+    txID = hashes.Hash(hashes.SHA256(), backend=default_backend())
+    txID.update(orjson.dumps(asdict(transaction), option=orjson.OPT_SORT_KEYS))
+    txID_hex = txID.finalize().hex()
+    
+    signed_transaction = {
+        "txID": txID_hex,
+        "raw_data": asdict(transaction),
+        "raw_data_hex": raw_data_hex,
+        "signature": [signature]
+    }
 
+    broadcast_response = requests.post(broadcast_url, json=signed_transaction)
+    response_data = broadcast_response.json()
+    if broadcast_response.status_code != 200 or response_data.get("code") is not None:
+        print(f"Broadcast failed: {response_data}")
+    else:
+        print("Broadcast successful:", response_data)
 
-broadcast_response = requests.post(broadcast_url, json=signed_transaction)
-print("Broadcast result:", broadcast_response.json())
+private_key_hex = "your_private_key_here"
+from_address = "your_from_address_here"
+to_address = "your_to_address_here"
+amount = 10 * 1_000_000  # 10 TRX
+
+create_and_broadcast_transaction(private_key_hex, from_address, to_address, amount)
