@@ -10,8 +10,9 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
 # Global constants for API URLs
-BLOCK_URL = "https://api.trongrid.io/walletsolidity/getnowblock"
+GETBLOCK_URL = "https://api.trongrid.io/walletsolidity/getblock"
 BROADCAST_URL = "https://api.trongrid.io/wallet/broadcasttransaction"
+# API_KEY = "your_getblock_api_key_here"  # Your GetBlock API Key
 
 # Helper function to convert Base58 to Hex
 def base58_to_hex(base58_address: str) -> str:
@@ -102,17 +103,25 @@ class SignedTransaction:
 
 # Class to encapsulate transaction creation and broadcasting
 class TronTransactionHandler:
-    def __init__(self, block_url: str = BLOCK_URL, broadcast_url: str = BROADCAST_URL):
-        self.block_url = block_url
+    def __init__(self, getblock_url: str = GETBLOCK_URL, broadcast_url: str = BROADCAST_URL, api_key: str = API_KEY):
+        self.getblock_url = getblock_url
         self.broadcast_url = broadcast_url
+        self.api_key = api_key
 
     def fetch_block_data(self):
-        # Fetch block data
-        block_response = requests.get(self.block_url)
-        if block_response.status_code != 200:
-            raise Exception(f"Failed to fetch block data, status code: {block_response.status_code}")
+        # Fetch block data using GetBlock API
+        headers = {
+            'accept': 'application/json',
+            'content-type': 'application/json',
+            # 'x-api-key': self.api_key
+        }
+        data = '{"detail":false}'
+        response = requests.post(self.getblock_url, headers=headers, data=data)
         
-        block_data = block_response.json()
+        if response.status_code != 200:
+            raise Exception(f"Failed to fetch block data, status code: {response.status_code}")
+        
+        block_data = response.json()
         ref_block_bytes = block_data['block_header']['raw_data']['number'] % 65536
         ref_block_bytes_hex = ref_block_bytes.to_bytes(2, 'big').hex()
         ref_block_hash = block_data['blockID'][:16]
