@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.DEBUG,
                     datefmt='%Y-%m-%d %H:%M:%S %a'
                     )
 
-provider = HTTPProvider(api_key='cc0......')
+provider = HTTPProvider(api_key='cc......')
 client = Tron(provider=provider)
 
 token_contract_address = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
@@ -37,7 +37,7 @@ def transfer_token(private_key_hex, to, amount):
     try:
         priv_key = PrivateKey(bytes.fromhex(private_key_hex))
         from_addr = priv_key.public_key.to_base58check_address()
-        amount_int = int(Decimal(amount) * Decimal(10 ** token_decimals))
+        amount_int = int(Decimal(str(amount)) * Decimal(10 ** token_decimals))
 
         txn = (
             contract.functions.transfer(to, amount_int)
@@ -53,7 +53,7 @@ def transfer_token(private_key_hex, to, amount):
 
 # 主循环逻辑（包裹异常）
 if __name__ == '__main__':
-    private_key = 'a9......'
+    private_key = 'a8......'
     recipient = 'TA......'
     try:
         sender = PrivateKey(bytes.fromhex(private_key)).public_key.to_base58check_address()
