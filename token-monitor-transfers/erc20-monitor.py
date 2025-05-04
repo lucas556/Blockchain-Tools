@@ -1,29 +1,68 @@
-## 使用eth_getLogs监控收款
 import aiohttp, asyncio, orjson, logging
 from logging.handlers import TimedRotatingFileHandler
 from decimal import Decimal, getcontext
 from web3 import Web3
+import time
 
 # ========== 常量配置 ==========
 INFURA_URL = "https://mainnet.infura.io/v3/8......"
-TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+VALUE_THRESHOLD = Decimal("100")
 CONTRACT_ADDRESS = "0x......"
-WATCH_ADDRESS = "0xa......"
+WATCH_ADDRESS = "0x......"
 PRIVATE_KEY = "<your_private_key_here>"
 RECIPIENT_ADDRESS = "<recipient_address_here>"
 DEFAULT_HEADERS = {"User-Agent": "Mozilla/5.0 aiohttp-client"}
 
-# ========== 全局 JSON-RPC 模板 ==========
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+# ========== Web3 初始化 ==========
+web3 = Web3(Web3.HTTPProvider(INFURA_URL))
+token_contract = web3.eth.contract(
+    address=web3.to_checksum_address(CONTRACT_ADDRESS),
+    abi=[
+        {
+            "constant": False,
+            "inputs": [{"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"}],
+            "name": "transfer",
+            "outputs": [{"name": "", "type": "bool"}],
+            "type": "function"
+        },
+        {
+            "constant": True,
+            "inputs": [],
+            "name": "symbol",
+            "outputs": [{"name": "", "type": "string"}],
+            "type": "function"
+        },
+        {
+            "constant": True,
+            "inputs": [],
+            "name": "decimals",
+            "outputs": [{"name": "", "type": "uint8"}],
+            "type": "function"
+        }
+    ]
+)
+
+# ========== 获取合约元信息 ==========
+try:
+    SYMBOL = token_contract.functions.symbol().call()
+except Exception:
+    SYMBOL = "TOKEN"
+    logging.warning(f"获取 symbol() 失败 {e}，使用默认 TOKEN")
+
+try:
+    DECIMALS = token_contract.functions.decimals().call()
+except Exception:
+    DECIMALS = 6
+    logging.warning(f"获取 decimals() 失败 {e}，使用默认 6")
+
+# ========== JSON-RPC 模板 ==========
 BLOCK_NUMBER_REQUEST = {
-    "jsonrpc": "2.0",
-    "method": "eth_blockNumber",
-    "params": [],
-    "id": 1
+    "jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1
 }
 
 LOGS_REQUEST_TEMPLATE = lambda contract, block_hex: {
-    "jsonrpc": "2.0",
-    "method": "eth_getLogs",
+    "jsonrpc": "2.0", "method": "eth_getLogs",
     "params": [{
         "fromBlock": block_hex,
         "toBlock": block_hex,
@@ -35,138 +74,98 @@ LOGS_REQUEST_TEMPLATE = lambda contract, block_hex: {
 
 TX_BASE_TEMPLATE = lambda nonce, gas_price: {
     'nonce': nonce,
-    'value': 0,
     'gasPrice': gas_price,
+    'value': 0,
     'chainId': 1
 }
 
-# ========== ABI ==========
-ERC20_ABI = [
-    {
-        "constant": False,
-        "inputs": [
-            {"name": "_to", "type": "address"},
-            {"name": "_value", "type": "uint256"}
-        ],
-        "name": "transfer",
-        "outputs": [{"name": "", "type": "bool"}],
-        "type": "function"
-    },
-    {
-        "constant": False,
-        "inputs": [
-            {"name": "_from", "type": "address"},
-            {"name": "_to", "type": "address"},
-            {"name": "_value", "type": "uint256"}
-        ],
-        "name": "transferFrom",
-        "outputs": [{"name": "", "type": "bool"}],
-        "type": "function"
-    }
-]
+getcontext().prec = 28
 
-getcontext().prec = 28  # 精度提升，避免浮点误差
-
-# ========== 通用请求函数 ==========
-async def request_handle(session, url, method="POST", json=None, data=None, headers=None, retries=3, timeout=10, verify_ssl=True):
-    headers = headers or DEFAULT_HEADERS
+# ========== 通用请求 ==========
+async def request_handle(session, url, json=None, retries=3):
     for attempt in range(1, retries + 1):
         try:
-            async with session.request(method, url, json=json, data=data, headers=headers, timeout=timeout, ssl=verify_ssl) as r:
-                content = await r.read()
-                if 200 <= r.status < 300:
-                    try:
-                        return orjson.loads(content)
-                    except orjson.JSONDecodeError:
-                        logging.warning(f"[{attempt}] JSON decode failed: {url}")
-                        return None
+            async with session.post(url, json=json, headers=DEFAULT_HEADERS, ssl=False) as resp:
+                if 200 <= resp.status < 300:
+                    return orjson.loads(await resp.read())
                 else:
-                    logging.error(f"[{attempt}] HTTP {r.status}: {await r.text()} | {url}")
-        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-            logging.warning(f"[{attempt}] Request error: {e}")
-        await asyncio.sleep(min(2 ** attempt, 10))
-    raise Exception(f"Request failed after {retries} attempts: {url}")
-
-# ========== 通用转账方法 ==========
-def send_erc20_transaction(web3, token_contract, private_key, from_account, to_address, amount, token_decimals, method="transfer", from_address=None):
-    try:
-        nonce = web3.eth.get_transaction_count(from_account)
-        gas_price = web3.eth.gas_price
-        value = int(Decimal(amount) * Decimal(10 ** token_decimals))
-
-        if method == "transferFrom" and from_address:
-            tx = token_contract.functions.transferFrom(from_address, to_address, value).build_transaction(
-                TX_BASE_TEMPLATE(nonce, gas_price)
-            )
-        else:
-            tx = token_contract.functions.transfer(to_address, value).build_transaction(
-                TX_BASE_TEMPLATE(nonce, gas_price)
-            )
-
-        tx['gas'] = web3.eth.estimate_gas(tx)
-        signed_tx = web3.eth.account.sign_transaction(tx, private_key)
-        tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        logging.info(f"{method} sent, tx_hash: {web3.to_hex(tx_hash)}")
-    except Exception as e:
-        logging.error(f"Error during {method}: {e}")
-
-# ========== 主监听类 ==========
-class TokenMonitor:
-    def __init__(self, contract_address, watch_address=None):
-        self.web3 = Web3(Web3.HTTPProvider(INFURA_URL))
-        self.contract_address = contract_address.casefold()
-        self.watch_address = watch_address.casefold() if watch_address else None
-        self.token_contract = self.web3.eth.contract(address=self.web3.to_checksum_address(contract_address), abi=ERC20_ABI)
-        self.from_account = self.web3.eth.account.from_key(PRIVATE_KEY).address
-
-    async def get_contract_transfers(self, session, block_hex, block_num):
-        try:
-            logs = await request_handle(session, INFURA_URL, json=LOGS_REQUEST_TEMPLATE(self.contract_address, block_hex), verify_ssl=False)
-            if not logs or not isinstance(logs.get("result"), list):
-                logging.warning(f"无效日志响应: {logs}")
-                return
-
-            for log in logs.get("result"):
-                from_addr = "0x" + log['topics'][1][-40:].casefold()
-                to_addr = "0x" + log['topics'][2][-40:].casefold()
-                if self.watch_address and to_addr != self.watch_address:
-                    continue
-                value = Decimal(int(log['data'], 16)) / Decimal(10 ** DECIMALS)
-                if value > VALUE_THRESHOLD:
-                    logging.info(f"区块 {block_num} | 💸 {value:.2f} {SYMBOL} from {from_addr} → {to_addr}")
-                    send_erc20_transaction(self.web3, self.token_contract, PRIVATE_KEY, self.from_account, Web3.to_checksum_address(RECIPIENT_ADDRESS), value, DECIMALS)
+                    logging.warning(f"HTTP {resp.status} - {await resp.text()}")
         except Exception as e:
-            logging.error(f"处理区块 {block_num} 出错: {e}")
+            logging.warning(f"Request attempt {attempt} failed: {e}")
+        await asyncio.sleep(2 ** attempt)
+    raise Exception(f"请求失败: {url}")
 
+# ========== 转账方法（含重试、估算 gas、nonce） ==========
+def send_token(to_address: str, amount: Decimal):
+    try:
+        to_checksum = web3.to_checksum_address(to_address)
+        sender = web3.eth.account.from_key(PRIVATE_KEY)
+        nonce = web3.eth.get_transaction_count(sender.address)
+        gas_price = web3.eth.gas_price
+
+        value = int(amount * Decimal(10 ** DECIMALS))
+        tx = token_contract.functions.transfer(to_checksum, value).build_transaction(
+            TX_BASE_TEMPLATE(nonce, gas_price)
+        )
+
+        tx['gas'] = int(web3.eth.estimate_gas(tx) * 1.2)  # 加 buffer
+        signed = web3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+
+        for attempt in range(1, 4):
+            try:
+                tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+                logging.info(f"转账成功: {web3.to_hex(tx_hash)}")
+                return
+            except Exception as e:
+                logging.warning(f"第 {attempt} 次发送失败: {e}")
+                time.sleep(1)
+    except Exception as e:
+        logging.error(f"转账异常: {e}")
+
+# ========== Token 监听器 ==========
+class TokenMonitor:
+    def __init__(self, contract, watch_addr=None):
+        self.contract = contract.casefold()
+        self.watch_addr = watch_addr.casefold() if watch_addr else None
+
+    async def handle_block(self, session, block_hex, block_number):
+        logs = await request_handle(session, INFURA_URL, json=LOGS_REQUEST_TEMPLATE(self.contract, block_hex))
+        if not logs or not isinstance(logs.get("result"), list):
+            logging.warning(f"无效日志响应: {logs}")
+            return
+
+        for log in logs["result"]:
+            from_addr = "0x" + log['topics'][1][-40:].casefold()
+            to_addr = "0x" + log['topics'][2][-40:].casefold()
+            if self.watch_addr and to_addr != self.watch_addr:
+                continue
+            value = Decimal(int(log['data'], 16)) / Decimal(10 ** DECIMALS)
+            if value > VALUE_THRESHOLD:
+                logging.info(f"区块 {block_number} | {value:.2f} {SYMBOL} from {from_addr} → {to_addr}")
+                send_token(RECIPIENT_ADDRESS, value)
 
 # ========== 主循环 ==========
-async def main_loop(interval=3):
-    monitor = TokenMonitor(CONTRACT_ADDRESS, watch_address=WATCH_ADDRESS)
+async def main_loop():
+    monitor = TokenMonitor(CONTRACT_ADDRESS, WATCH_ADDRESS)
     last_block = None
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                latest_block = await request_handle(session, INFURA_URL, json=BLOCK_NUMBER_REQUEST, verify_ssl=False)
-                block_num = int(latest_block["result"], 16)
+                resp = await request_handle(session, INFURA_URL, json=BLOCK_NUMBER_REQUEST)
+                block_num = int(resp["result"], 16)
                 if last_block is None:
                     last_block = block_num - 1
-
                 for bn in range(last_block + 1, block_num + 1):
-                    logging.info(f"⏳ 正在处理区块: {bn}")
-                    await monitor.get_contract_transfers(session, hex(bn), bn)
+                    logging.info(f"扫描区块 {bn}")
+                    await monitor.handle_block(session, hex(bn), bn)
                 last_block = block_num
             except Exception as e:
-                logging.error(f"主循环出错: {e}")
-            await asyncio.sleep(interval)
-
+                logging.error(f"主循环错误: {e}")
+            await asyncio.sleep(3)
 
 # ========== 日志配置与启动 ==========
 if __name__ == "__main__":
-    file_handler = TimedRotatingFileHandler("monitor.log", when="midnight", backupCount=7, encoding="utf-8")
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
-
-    logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
+    handler = TimedRotatingFileHandler("monitor.log", when="midnight", backupCount=7, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[handler, logging.StreamHandler()])
     asyncio.run(main_loop())
