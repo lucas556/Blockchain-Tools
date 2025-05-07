@@ -1,46 +1,57 @@
-
-
-import logging
 import base58
-import nayuki_crypto
-from hashlib import pbkdf2_hmac
 import json
+import logging
+from hashlib import pbkdf2_hmac
+from bitarray import bitarray
+import re
+import nayuki_crypto 
 
 HARDENED_OFFSET = 0x80000000
+DEFAULT_BIP44_PATH = [44 + HARDENED_OFFSET, 195 + HARDENED_OFFSET, 0 + HARDENED_OFFSET, 0, 0]
+
 CURVE_ORDER = int("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
 SECP256K1_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 class MnemonicValidator:
+    __slots__ = ("wordlist", "word_index")
+
     def __init__(self, wordlist_path="english.txt"):
         self.wordlist = self._load_wordlist(wordlist_path)
         self.word_index = {word: i for i, word in enumerate(self.wordlist)}
 
     def _load_wordlist(self, path) -> list:
         with open(path, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f.readlines() if line.strip()]
+            return [line.strip() for line in f if line.strip()]
 
-    def is_valid(self, mnemonic: str) -> bool:
-        words = mnemonic.strip().split()
+    def is_valid(self, words: list[str]) -> bool:
         if len(words) not in [12, 15, 18, 21, 24]:
-            return False
+            raise ValueError(f"助记词长度无效，实际为 {len(words)} 个词。")
+
         try:
             indices = [self.word_index[w] for w in words]
-        except ValueError:
-            return False
-        bit_str = ''.join(f"{index:011b}" for index in indices)
-        entropy_length = len(bit_str) - len(bit_str) // 33
-        entropy_bits = bit_str[:entropy_length]
-        checksum_bits = bit_str[entropy_length:]
-        entropy_bytes = int(entropy_bits, 2).to_bytes(entropy_length // 8, byteorder="big")
+        except KeyError as e:
+            raise ValueError(f"助记词中存在无效单词：{e}")
+
+        bits = bitarray(endian='big')
+        encode_table = {i: f"{i:011b}" for i in range(2048)}
+        bits.encode(encode_table, indices)
+
+        entropy_length = len(bits) - len(bits) // 33
+        entropy_bits = bits[:entropy_length]
+        checksum_bits = bits[entropy_length:]
+
+        entropy_bytes = int(entropy_bits.to01(), 2).to_bytes(entropy_length // 8, byteorder="big")
         hash_bytes = nayuki_crypto.sha256(entropy_bytes)
         hash_bits = bin(int.from_bytes(hash_bytes, "big"))[2:].zfill(256)
-        expected_checksum = hash_bits[:len(checksum_bits)]
+        expected_checksum = bitarray(hash_bits[:len(checksum_bits)])
+
         return checksum_bits == expected_checksum
 
+
 class BIP32Key:
+    __slots__ = ("privkey", "chain_code", "depth", "index", "parent_fingerprint")
+
     def __init__(self, privkey: bytes, chain_code: bytes, depth=0, index=0, parent_fingerprint=b'\x00\x00\x00\x00'):
         self.privkey = privkey
         self.chain_code = chain_code
@@ -59,24 +70,34 @@ class BIP32Key:
         else:
             pubkey = nayuki_crypto.private_to_public(list(self.privkey))
             data = bytes(pubkey) + index.to_bytes(4, 'big')
+
         I = nayuki_crypto.hmac_sha512(self.chain_code, data)
         Il, Ir = I[:32], I[32:]
-        child_priv_int = (int.from_bytes(Il, 'big') + int.from_bytes(self.privkey, 'big')) % CURVE_ORDER
+
+        Il_int = int.from_bytes(Il, 'big')
+        if Il_int >= CURVE_ORDER:
+            raise ValueError("Il >= CURVE_ORDER: Invalid child derivation.")
+
+        child_priv_int = (Il_int + int.from_bytes(self.privkey, 'big')) % CURVE_ORDER
+        if child_priv_int == 0:
+            raise ValueError("Derived private key is zero, which is invalid.")
+
         child_priv = child_priv_int.to_bytes(32, 'big')
         return BIP32Key(child_priv, Ir, self.depth + 1, index)
+
 
 class TronAddress:
     @staticmethod
     def public_key_from_private(private_key_bytes: bytes) -> bytes:
-        pubkey = nayuki_crypto.private_to_public(list(private_key_bytes))
-        prefix = pubkey[0]
-        x = int.from_bytes(pubkey[1:33], 'big')
+        compressed = bytes(nayuki_crypto.private_to_public(list(private_key_bytes)))
+        prefix = compressed[0]
+        x = int.from_bytes(compressed[1:], 'big')
         y = TronAddress._recover_y(prefix, x)
         return b'\x04' + x.to_bytes(32, 'big') + y.to_bytes(32, 'big')
 
     @staticmethod
     def _recover_y(prefix: int, x: int) -> int:
-        y_sq = (x * x * x + 7) % SECP256K1_P
+        y_sq = (x ** 3 + 7) % SECP256K1_P
         y = pow(y_sq, (SECP256K1_P + 1) // 4, SECP256K1_P)
         if (y % 2) != (prefix & 1):
             y = SECP256K1_P - y
@@ -88,20 +109,22 @@ class TronAddress:
         address_bytes = b'\x41' + hash20
         return base58.b58encode_check(address_bytes).decode()
 
+
 class TronWalletGenerator:
+    __slots__ = ("mnemonic", "passphrase", "path", "words", "mnemonic_validator", "seed", "master_key")
+
     def __init__(self, mnemonic: str, passphrase: str = "", path: list = None):
         self.mnemonic = mnemonic.strip()
         self.passphrase = passphrase
-        self.path = path or [44 + HARDENED_OFFSET, 195 + HARDENED_OFFSET, 0 + HARDENED_OFFSET, 0, 0]
+        self.path = path or DEFAULT_BIP44_PATH
+        self.words = re.findall(r'\S+', self.mnemonic)
         self.mnemonic_validator = MnemonicValidator("english.txt")
 
-        if not self.mnemonic_validator.is_valid(self.mnemonic):
-            logger.error("助记词无效，请检查拼写或顺序。")
+        if not self.mnemonic_validator.is_valid(self.words):
             raise ValueError("助记词无效，请检查拼写或顺序。")
 
         self.seed = self._mnemonic_to_seed()
         self.master_key = BIP32Key.from_seed(self.seed)
-        logger.info("Wallet initialized successfully.")
 
     def _mnemonic_to_seed(self) -> bytes:
         salt = b"mnemonic" + self.passphrase.encode("utf-8")
@@ -125,7 +148,11 @@ class TronWalletGenerator:
             "address": address,
         }
 
+
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+
     mnemonic = "aware report movie exile buyer drum poverty supreme gym oppose float elegant"
     wallet = TronWalletGenerator(mnemonic)
     info = wallet.generate()
