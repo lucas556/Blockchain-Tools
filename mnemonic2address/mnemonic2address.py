@@ -1,3 +1,5 @@
+### 方法是错误的,待修复
+
 import logging
 import base58
 import nayuki_crypto
