@@ -34,7 +34,7 @@ class MnemonicValidator:
             raise ValueError(f"助记词中存在无效单词：{e}")
 
         bits = bitarray(endian='big')
-        encode_table = {i: f"{i:011b}" for i in range(2048)}
+        encode_table = {i: bitarray(f"{i:011b}") for i in range(2048)}
         bits.encode(encode_table, indices)
 
         entropy_length = len(bits) - len(bits) // 33
